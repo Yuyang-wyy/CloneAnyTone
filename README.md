@@ -17,7 +17,7 @@ After training the `hybrid_wavenet_unet` model, you can visualize its performanc
 
 Signal Comparison of Delay Model
 
-![Signal Comparison of Overdrive + Reverb Model](models/Overdrive%2BDelay/detail_signal_comparison_e2s_0.005.png)
+![Signal Comparison of Overdrive + Reverb Model](models/Overdrive%2BReverb/detail_signal_comparison_e2s_0.005.png)
 
 Signal Comparison of Overdrive + Reverb Model
 

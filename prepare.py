@@ -1,3 +1,7 @@
+"""
+Prepare.py is adapted from the open-source repository: GuitarML/PedalNetRT, available at: https://github.com/GuitarML/PedalNetRT. 
+"""
+
 import argparse
 import pickle
 from scipy.io import wavfile
@@ -180,7 +184,7 @@ if __name__ == "__main__":
     # --- 关键参数 ---
     parser.add_argument("--target_sample_rate", type=int, default=44100,
                         help="Target sample rate to resample all audio to.")
-    parser.add_argument("--target_sample_size", type=int, default=44100,
+    parser.add_argument("--target_sample_size", type=int, default=88200,
                         help="The length of each audio segment in samples. Default is 2 seconds at 44.1kHz.")
     parser.add_argument("--hop_size", type=int, default=None,
                         help="Step size for the sliding window. If None, defaults to 50%% overlap (sample_size / 2).")

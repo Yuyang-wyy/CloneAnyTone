@@ -308,7 +308,7 @@ if __name__ == "__main__":
     # 通用训练参数
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=2e-3)
-    parser.add_argument("--max_epochs", type=int, default=2500)
+    parser.add_argument("--max_epochs", type=int, default=500)
     parser.add_argument("--cpu", action="store_true", help="Force CPU training")
     
     # 在 parser.add_argument 部分添加：

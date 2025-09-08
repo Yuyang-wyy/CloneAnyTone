@@ -41,6 +41,7 @@ python prepare.py data/dataset_clean_New.wav data/dataset_overdrive_reverb_delay
 ```
 
 Preparation notes:
+- Can be skipped if not using self-recorded dataset.
 - Default sample rate is 44.1 kHz. Stereo inputs are averaged to mono.
 - Default segment length is 88200 samples (2.0 s) with 50% overlap (hop 44100).
 - Data are normalized and standardized (x only) with training-set statistics.

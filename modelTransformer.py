@@ -1,28 +1,33 @@
+"""
+The Wavenet-related part is adapted from the open-source repository: GuitarML/PedalNetRT, available at: https://github.com/GuitarML/PedalNetRT. 
+"""
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 
 class LearnedIRConvolver(nn.Module):
-    """可学习的脉冲响应卷积（基于时域快速实现，训练友好）
-    输入: (B, 1, T)
-    输出: (B, 1, T) 与输入对齐（截断/填充）
+    """Trainable Impulse Response Convolver (optimized for time-domain training)
+    Input:  (B, 1, T)
+    Output: (B, 1, T) aligned with input (truncated/padded)
     """
     def __init__(self, ir_length=44100, wet=0.5):
         super().__init__()
         self.ir_length = ir_length
-        # 初始化为近似单位冲激，以免训练初期破音
+        # Initialize as approximate unit impulse to avoid clipping during early training
         ir = torch.zeros(ir_length)
         ir[0] = 1.0
         self.ir = nn.Parameter(ir)  # (L,)
-        # 可训练的湿度参数
-        self.wet_param = nn.Parameter(torch.tensor(float(wet)).atanh())  # 通过sigmoid映射到(0,1)
+         # Trainable wet/dry mix parameter
+        self.wet_param = nn.Parameter(torch.tensor(float(wet)).atanh())  # mapped to (0,1) via sigmoid
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, t = x.shape
         assert c == 1
-        # 使用 group conv1d 实现 1D 卷积（时间反转的核）
-        # 构造 (out_channels=1, in_channels=1, kernel=L)
+        # Use group conv1d to implement 1D convolution (with time-reversed kernel)
+        # Construct kernel: (out_channels=1, in_channels=1, kernel_size=L)
         kernel = self.ir.flip(0).view(1, 1, -1)
         y = F.conv1d(x, kernel, padding=self.ir_length - 1)
         y = y[:, :, :t]
@@ -32,35 +37,35 @@ class LearnedIRConvolver(nn.Module):
 
 class TrainableFastConvolver(nn.Module):
     """
-    可训练的高性能频域卷积器 (专为训练优化)
+    Trainable High-Performance Frequency-Domain Convolver (optimized for training long kernels)
     
-    这个模块使用全块FFT卷积，是训练长卷积核最快、最直接的方法。
-    它在数学上等价于时域卷积，并且完全可微分。
+    This module uses full-block FFT convolution — the fastest and most straightforward method 
+    for training long convolution kernels. It is mathematically equivalent to time-domain 
+    convolution and fully differentiable.
     """
     def __init__(self, ir_length, train_seq_len, wet=0.25):
         """
         Args:
-            ir_length (int): 可学习脉冲响应的长度
-            train_seq_len (int): 训练时输入音频的固定长度
-            wet (float): 初始干湿比
+            ir_length (int): Length of trainable impulse response
+            train_seq_len (int): Fixed input audio length during training
+            wet (float): Initial wet/dry mix ratio
         """
         super().__init__()
         self.ir_length = ir_length
         self.train_seq_len = train_seq_len
 
-        # --- 核心优化：在初始化时就计算好FFT尺寸 ---
-        # 卷积结果的长度为 train_seq_len + ir_length - 1
+        # Convolution output length = train_seq_len + ir_length - 1
         required_len = self.train_seq_len + self.ir_length - 1
-        # 找到比它大的最小的2的次幂，以获得最高FFT效率
+        # Find smallest power of 2 greater than required_len for optimal FFT efficiency
         self.fft_size = 1 << (required_len - 1).bit_length()
 
-        # --- 可学习参数 ---
-        # 初始化为近似单位冲激，避免训练初期数值爆炸或静音
+        # --- Trainable Parameters ---
+        # Initialize as approximate unit impulse to avoid numerical instability or silence early in training
         ir = torch.zeros(ir_length)
         ir[0] = 1.0
         self.ir = nn.Parameter(ir)  # (L,)
 
-        # 可学习的干湿比参数
+        # Trainable wet/dry mix parameter
         self.wet_param = nn.Parameter(torch.tensor(float(wet)).atanh())
 
         print(f"TrainableFastConvolver initialized:")
@@ -71,48 +76,48 @@ class TrainableFastConvolver(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x (torch.Tensor): 输入音频块 (B, 1, train_seq_len)
+            x (torch.Tensor): Input audio block (B, 1, train_seq_len)
         Returns:
-            y (torch.Tensor): 输出音频块 (B, 1, train_seq_len)
+            y (torch.Tensor): Output audio block (B, 1, train_seq_len)
         """
         batch_size, channels, seq_len = x.shape
         
-        # 安全检查，确保输入长度符合预期
+        # Safety check: ensure input length matches expected training length
         if seq_len != self.train_seq_len:
             raise ValueError(f"Input seq_len ({seq_len}) must match configured train_seq_len ({self.train_seq_len})")
 
-        # 1. 准备IR的FFT
-        #    因为 self.ir 是可训练参数，它的FFT必须在每次前向传播时重新计算
+        # 1. Prepare IR FFT
+        # Since self.ir is a trainable parameter, its FFT must be recomputed at every forward pass
         padded_ir = F.pad(self.ir, (0, self.fft_size - self.ir_length))
         ir_fft = torch.fft.rfft(padded_ir) # (fft_size//2 + 1,)
 
-        # 2. 准备输入的FFT
+        # 2. Prepare input FFT
         padded_x = F.pad(x, (0, self.fft_size - seq_len))
         x_fft = torch.fft.rfft(padded_x) # (B, 1, fft_size//2 + 1)
 
-        # 3. 频域相乘 (核心)
-        #    需要将 ir_fft 的维度扩展以匹配 x_fft 的 batch 维度
+        # 3. Multiply in frequency domain (core operation)
+        # Expand ir_fft dimensions to match batch dimension of x_fft
         y_fft = x_fft * ir_fft.view(1, 1, -1)
 
-        # 4. 逆FFT回到时域
+        # 4. Inverse FFT back to time domain
         y_conv = torch.fft.irfft(y_fft, n=self.fft_size)
 
-        # 5. 裁剪到原始输入长度
+        # 5. Truncate to original input length
         y_conv = y_conv[:, :, :seq_len]
 
-        # 6. 应用干湿比混合
+        # 6. Apply wet/dry mix
         wet = torch.sigmoid(self.wet_param)
         return (1 - wet) * x + wet * y_conv
 
 class AudioPositionalEncoding(nn.Module):
-    """专为吉他效果器设计的多尺度可学习位置编码"""
+    """Multi-scale learnable positional encoding designed for guitar audio effects"""
     
     def __init__(self, d_model, max_seq_len=4410, dropout=0.05, num_scales=4):
         """
         Args:
-            d_model: 模型维度 (建议256+)
-            max_seq_len: 最大序列长度 (prepare.py生成的4410)
-            num_scales: 多尺度数量 (关键参数)
+            d_model: Model dimension
+            max_seq_len: Maximum sequence length 
+            num_scales: Number of temporal scales (key parameter)
         """
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -120,55 +125,55 @@ class AudioPositionalEncoding(nn.Module):
         self.num_scales = num_scales
         self.d_model = d_model
         
-        # 确保 d_model 能被 num_scales 整除
+        # Ensure d_model is divisible by num_scales
         assert d_model % num_scales == 0, f"d_model ({d_model}) must be divisible by num_scales ({num_scales})"
         self.scale_dim = d_model // num_scales
         
-        # 多尺度位置编码 (核心创新)
-        # 每个尺度捕获不同时间分辨率的特征
+        # Multi-scale positional encoding (core innovation)
+        # Each scale captures features at different temporal resolutions
         self.scales = nn.ParameterList([
             nn.Parameter(torch.randn(max_seq_len, self.scale_dim) * 0.05)
             for _ in range(num_scales)
         ])
         
-        # 音频感知初始化 (关键!)
+        # Audio-aware initialization (critical!))
         self._audio_aware_init()
         
-        # 尺度权重 (让模型学习各尺度重要性)
+        # Scale weights (allow model to learn importance of each scale)
         self.scale_weights = nn.Parameter(torch.ones(num_scales))
         
-        # 频率感知掩码 (增强高频敏感性)
+        # Frequency-aware mask (enhance sensitivity to high-frequency transients)
         freq_mask = self._create_frequency_mask(max_seq_len)
         self.register_buffer('freq_mask', freq_mask)
     
     def _audio_aware_init(self):
-        """基于音频信号特性的专业初始化"""
+        """Professional initialization based on audio signal characteristics"""
         for i, scale in enumerate(self.scales):
-            # 尺度i对应的时间分辨率: 2^i 毫秒
+            # Time resolution for scale i: 2^i milliseconds
             time_scale = 2 ** i  # 1ms, 2ms, 4ms, 8ms
             
-            # 创建与吉他信号匹配的初始模式
+            # Create patterns matching guitar signal characteristics
             pos = torch.arange(self.max_seq_len, dtype=torch.float)
             
-            # 生成基础模式 (对数间隔频率)
-            base_freq = 0.5 * (0.2 ** i)  # 递减频率
-            # 为每个维度生成不同的模式
+            # Generate base pattern (logarithmically spaced frequencies)
+            base_freq = 0.5 * (0.2 ** i)   # decreasing frequency
+            # Generate different patterns for each dimension
             pattern_matrix = torch.zeros(self.max_seq_len, self.scale_dim)
             for j in range(self.scale_dim):
-                pattern = torch.sin(pos * base_freq * (j + 1))  # 不同频率
+                pattern = torch.sin(pos * base_freq * (j + 1))  # varying frequencies
                 noise = torch.randn_like(pattern) * 0.02
                 pattern_matrix[:, j] = (pattern + noise) * 0.1
             
-            # 应用到参数
+            # Apply to parameter
             with torch.no_grad():
                 scale.data = pattern_matrix
     
     def _create_frequency_mask(self, seq_len):
-        """增强高频细节的掩码 (针对吉他瞬态)"""
+        """Mask to enhance high-frequency detail (targeting guitar transients)"""
         mask = torch.ones(seq_len, 1)
-        # 增强前200ms的高频权重 (关键瞬态区域)
+        # Boost weight for first 200ms (critical transient region))
         mask[:int(0.2 * seq_len)] = 1.5
-        # 渐变衰减
+        # Gradual decay
         for i in range(int(0.2 * seq_len), seq_len):
             mask[i] = 1.5 - 0.5 * (i - 0.2*seq_len) / (0.8*seq_len)
         return mask
@@ -177,7 +182,7 @@ class AudioPositionalEncoding(nn.Module):
         if seq_len is None:
             seq_len = x.size(1)
 
-        # 多尺度位置编码组合（正确方式）
+        # Combine multi-scale positional encodings
         pos_enc_list = []
         weights = torch.softmax(self.scale_weights, dim=0)  # shape: [num_scales]
 
@@ -187,17 +192,17 @@ class AudioPositionalEncoding(nn.Module):
             weighted_scale_enc = scale_enc * weight
             pos_enc_list.append(weighted_scale_enc)
 
-        # 拼接所有尺度的位置编码
+        # Concatenate all scales
         pos_enc = torch.cat(pos_enc_list, dim=1)  # [seq_len, d_model]
         
-        # 验证维度
+        # Validate dimensions
         assert pos_enc.shape == (seq_len, self.d_model), f"pos_enc shape {pos_enc.shape} != ({seq_len}, {self.d_model})"
 
-        # 应用频率掩码
+        # Apply frequency mask
         freq_mask = self.freq_mask[:seq_len]  # [seq_len, 1]
         pos_enc = pos_enc * freq_mask  # [seq_len, d_model] * [seq_len, 1]
 
-        # 增加 batch 维度并 dropout
+        # Add batch dimension and apply dropout
         pos_enc = pos_enc.unsqueeze(0)  # [1, seq_len, d_model]
         return self.dropout(x + pos_enc)
 
@@ -253,7 +258,7 @@ class WaveNet(nn.Module):
             kernel_size=1,
         )
 
-        # 修改这里：支持自定义输出通道数
+        # Support custom output channel count
         self.output_channels = output_channels or num_channels
         self.linear_mix = nn.Conv1d(
             in_channels=num_channels * dilation_depth * num_repeat,
@@ -271,7 +276,7 @@ class WaveNet(nn.Module):
             x = out
             out_hidden = hidden(x)
 
-            # gated activation
+            # Gated activation
             out_hidden_split = torch.split(out_hidden, self.num_channels, dim=1)
             out = torch.tanh(out_hidden_split[0]) * torch.sigmoid(out_hidden_split[1])
 
@@ -280,48 +285,47 @@ class WaveNet(nn.Module):
             out = residual(out)
             out = out + x[:, :, -out.size(2) :]
 
-        # modified "postprocess" step:
+        # Modified "postprocess" step:
         out = torch.cat([s[:, :, -out.size(2) :] for s in skips], dim=1)
         out = self.linear_mix(out)
         return out
 
 class CausalTransformer(nn.Module):
-    """专为吉他效果器设计的因果Transformer模型
-    完美匹配prepare.py生成的数据格式 (batch, 1, seq_len)
+    """Causal Transformer model designed for guitar audio effects
     """
     def __init__(self, d_model=64, nhead=4, num_layers=2, dim_feedforward=128, max_seq_len=4410):
         super().__init__()
         self.d_model = d_model
-        self.max_seq_len = max_seq_len  # 支持prepare.py生成的4410长度
+        self.max_seq_len = max_seq_len 
         
-        # ✅ 修改1: 输入投影层 - 每个时间点的1维特征 -> d_model
+        # Input projection: 1D feature per timestep → d_model
         self.input_proj = nn.Linear(1, d_model)
 
         self.pos_encoding = AudioPositionalEncoding(
             d_model=d_model,
             max_seq_len=max_seq_len,
-            num_scales=4  # 捕获1ms/2ms/4ms/8ms多尺度特征
+            num_scales=4  # Capture 1ms/2ms/4ms/8ms multi-scale features
         )
         
-        # Transformer编码器 (使用batch_first=True提升性能)
+        # Transformer encoder (using batch_first=True for performance)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=0.1,
             activation='gelu',
-            batch_first=True  # ✅ 新增: 提升性能
+            batch_first=True  # Improved performance
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers)
         
-        # ✅ 修改2: 输出投影层 - 从d_model -> 1
+        # Output projection: d_model → 1D prediction per timestep
         self.output_proj = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Linear(d_model, 1)  # 输出每个时间点的1维预测
         )
         
-        # 创建因果掩码 (max_seq_len, max_seq_len)
+        # Create causal mask (max_seq_len, max_seq_len)
         mask = torch.triu(torch.ones(max_seq_len, max_seq_len), diagonal=1).bool()
         self.register_buffer('causal_mask', mask)
         
@@ -330,61 +334,60 @@ class CausalTransformer(nn.Module):
         print("Accepts input shape: (batch_size, 1, seq_len) where seq_len <= max_seq_len")
 
     def _init_weights(self):
-        """专业音频模型的特殊初始化"""
+        """Specialized initialization for professional audio models"""
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-            if isinstance(p, nn.Linear) and p.out_features == 1:  # ✅ 修改: 检查输出维度为1
+            if isinstance(p, nn.Linear) and p.out_features == 1:
                 nn.init.uniform_(p.weight, -0.01, 0.01)
                 nn.init.zeros_(p.bias)
 
     def forward(self, x):
         """
-        前向传播 (严格因果)
+        Forward pass (strictly causal)
         Args:
-            x: (batch_size, 1, seq_len) 音频输入 - prepare.py生成的格式
+            x: (batch_size, 1, seq_len) audio input — format generated by prepare.py
         Returns:
-            y: (batch_size, 1, seq_len) 处理后的音频
+            y: (batch_size, 1, seq_len) processed audio
         """
         batch_size, channels, seq_len = x.shape
         assert channels == 1, f"Expected 1 channel, got {channels}"
         assert seq_len <= self.max_seq_len, f"Sequence length {seq_len} exceeds maximum {self.max_seq_len}"
         
-        # 1. 转置为 (batch_size, seq_len, 1) 以匹配线性层输入
+        # 1. Transpose to (batch_size, seq_len, 1) for linear layer
         x = x.transpose(1, 2)  # (B, 1, T) -> (B, T, 1)
         
-        # 2. ✅ 输入投影 - 每个时间点从1维映射到d_model
+        # 2. Input projection — map 1D → d_model per timestep
         x = self.input_proj(x)  # (B, T, 1) -> (B, T, D)
 
-        # 3. 应用位置编码
+        # 3. Apply positional encoding
         x = self.pos_encoding(x, seq_len=seq_len)
         
-        # 4. ✅ 创建适当大小的因果掩码 (使用batch_first时mask需要调整)
+        # 4. Create appropriately sized causal mask
         causal_mask = self.causal_mask[:seq_len, :seq_len]
         
-        # 5. 添加数值稳定性措施
-        # 保存原始值以便检查NaN
+        # 5. Add numerical stability measures
         x_check = x.clone()
         
-        # 5. Transformer处理
+        # 6. Transformer processing
         try:
             x = self.transformer_encoder(x, mask=causal_mask)
         except Exception as e:
             print(f"Transformer error: {e}")
             print(f"Input stats - mean: {x_check.mean()}, std: {x_check.std()}, max: {x_check.max()}, min: {x_check.min()}")
-            # 返回一个安全的输出
+            # Return safe output
             return torch.zeros_like(x_check).transpose(1, 2)
         
-        # 6. 输出投影 - 从d_model映射回1维
+        # 7. Output projection — map d_model → 1D
         y = self.output_proj(x)  # (B, T, D) -> (B, T, 1)
         
-        # 7. 裁剪回原始序列长度（如果需要）
+        # 8. Truncate to original sequence length if needed
         y = y[:, :seq_len, :]
         
-        # 8. 转置回 (batch_size, 1, seq_len) 匹配输入格式
+        # 9. Transpose back to (batch_size, 1, seq_len) to match input format
         y = y.transpose(1, 2)
         
-        # 9. 限制输出范围
+        # 10. Clamp output range
         return torch.tanh(y)
 
 
@@ -394,19 +397,19 @@ class HybridAudioModel(nn.Module):
                  transformer_nhead=4, transformer_dim_feedforward=128):
         super().__init__()
         
-        # 前置 WaveNet 层 (局部特征提取)
+        # Front-end WaveNet layer (local feature extraction)
         self.wavenet_front = WaveNet(
             num_channels=wavenet_channels,
             dilation_depth=dilation_depth,
             num_repeat=num_repeat,
             kernel_size=kernel_size,
-            output_channels=wavenet_channels  # 让WaveNet输出多通道
+            output_channels=wavenet_channels 
         )
 
-        # 投影层：把 wavenet_channels -> 1，适配 CausalTransformer 输入
+        # Projection layer: reduce wavenet_channels → 1 to match CausalTransformer input
         self.channel_projection = nn.Conv1d(wavenet_channels, 1, kernel_size=1)
         
-        # Transformer (全局特征建模)
+        # Transformer (global dependency modeling)
         self.transformer = CausalTransformer(
             d_model=transformer_d_model,
             nhead=transformer_nhead,
@@ -415,25 +418,22 @@ class HybridAudioModel(nn.Module):
         )
         
     def forward(self, x):
-        # 输入: x = [B, 1, 4410]
+        # Input: x = [B, 1, 4410]
         #print(f"Input shape: {x.shape}")
         
-        # 先用 WaveNet 提取局部特征
         local_features = self.wavenet_front(x)  # [B, wavenet_channels, 4410]
         #print(f"WaveNet output shape: {local_features.shape}")
         
-        # 使用投影层将多通道压缩为单通道
         projected_features = self.channel_projection(local_features)  # [B, 1, 4410]
         #print(f"After projection: {projected_features.shape}")
         
-        # 用 Transformer 建模全局依赖
         output = self.transformer(projected_features)  # [B, 1, 4410]
         #print(f"Transformer output shape: {output.shape}")
         
         return output
 
 class EncoderBlock(nn.Module):
-    """编码器模块：步长卷积降采样 + 普通卷积块"""
+    """Encoder block: strided convolution downsampling + standard convolution block"""
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=2):
         super().__init__()
         self.conv_down = CausalConv1d(in_channels, out_channels, kernel_size=kernel_size, stride=stride)
@@ -453,7 +453,7 @@ class EncoderBlock(nn.Module):
         return F.gelu(out + res)
 
 class DecoderBlock(nn.Module):
-    """解码器模块：转置卷积上采样 + 跳跃连接 + 普通卷积块"""
+    """Decoder block: transposed convolution upsampling + skip connection + standard convolution block"""
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=2):
         super().__init__()
         self.upsample = nn.ConvTranspose1d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=1, output_padding=stride-1)
@@ -465,12 +465,12 @@ class DecoderBlock(nn.Module):
     def forward(self, x, skip_connection):
         up_x = self.upsample(x)
         
-        # 动态创建skip connection适配器（如果需要）
+        # Dynamically create skip connection adapter if needed
         if skip_connection.size(1) != up_x.size(1):
             adapter = nn.Conv1d(skip_connection.size(1), up_x.size(1), kernel_size=1).to(x.device)
             skip_connection = adapter(skip_connection)
         
-        # 长度对齐
+        # Length alignment
         if skip_connection.size(2) > up_x.size(2):
             skip_connection = skip_connection[:, :, :up_x.size(2)]
         if up_x.size(2) > skip_connection.size(2):
@@ -481,20 +481,20 @@ class DecoderBlock(nn.Module):
 
 class ReverbLongModel(nn.Module):
     """
-    能处理长序列的深度 U-Net 混合模型 - 完全动态版本
+    Deep U-Net Hybrid Model for Long Sequences — Fully Dynamic Version
     """
     def __init__(self, d_model=128, nhead=4, num_layers=4, dim_feedforward=512,
                  encoder_channels=[1, 32, 64, 128], 
                  decoder_channels=[128, 64, 32, 16],
-                 encoder_strides=[4, 4, 4,],
-                 decoder_strides=[4, 4, 4]):
+                 encoder_strides=[2, 4, 4],
+                 decoder_strides=[4, 4, 2]):
         super().__init__()
         
-        self.input_length = 44100
-        # 确保编码器和解码器通道数匹配
+        self.input_length = 88200
+        # Ensure encoder and decoder have matching number of layers
         assert len(encoder_channels) == len(decoder_channels), "Encoder and decoder must have same number of layers"
         
-        # --- 动态编码器 ---
+        # --- Dynamic Encoder ---
         self.encoders = nn.ModuleList()
         for i in range(len(encoder_channels) - 1):
             in_ch = encoder_channels[i]
@@ -503,12 +503,12 @@ class ReverbLongModel(nn.Module):
             kernel_size = 7 if i < 2 else 5
             self.encoders.append(EncoderBlock(in_ch, out_ch, kernel_size=kernel_size, stride=stride))
         
-        # --- 瓶颈层 (简化Transformer) ---
+        # --- Bottleneck (Simplified Transformer) ---
         self.proj_to_transformer = nn.Linear(encoder_channels[-1], d_model)
 
         self.pos_encoding = AudioPositionalEncoding(
             d_model=d_model,
-            max_seq_len=44100,  # 因为你处理的是 88200 长度的片段
+            max_seq_len=44100,
             dropout=0.05,
             num_scales=4
         )
@@ -520,12 +520,12 @@ class ReverbLongModel(nn.Module):
             dropout=0.1,
             activation='gelu',
             batch_first=True,
-            norm_first=True  # 新增：LayerNorm 放在前面，有助于训练稳定
+            norm_first=True  # Added: LayerNorm before sublayers, improves training stability
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         self.proj_from_transformer = nn.Linear(d_model, encoder_channels[-1])
 
-        # --- 动态解码器 ---
+        # --- Dynamic Decoder ---
         self.decoders = nn.ModuleList()
         for i in range(len(decoder_channels) - 1):
             in_ch = decoder_channels[i]
@@ -540,49 +540,47 @@ class ReverbLongModel(nn.Module):
     def forward(self, x):
         input_length = x.shape[2]
         
-        # 验证输入长度
+        # Validate input length
         if input_length != self.input_length:
             raise ValueError(f"Expected input length {self.input_length}, got {input_length}")
         
-        # 1. 编码器路径 - 正确的skip connection收集
-        skip_connections = [x]  # 原始输入
+        # 1. Encoder path — collect skip connections correctly
+        skip_connections = [x]  # Original input
         current = x
         
         for encoder in self.encoders:
             current = encoder(current)
-            skip_connections.append(current)  # 保存每个编码器的输出
+            skip_connections.append(current)  # Save output of each encoder
         
-        # skip_connections现在是: [x, enc1_out, enc2_out, enc3_out, enc4_out]
+        # skip_connections [x, enc1_out, enc2_out, enc3_out, enc4_out]
         
-        # 2. 瓶颈层 - Transformer处理
+        # 2. Bottleneck — Transformer processing
         bottleneck = current.transpose(1, 2)  # [B, channels, seq_len] -> [B, seq_len, channels]
         bottleneck = self.proj_to_transformer(bottleneck)  # [B, seq_len, channels] -> [B, seq_len, d_model]
 
-        # 动态创建因果掩码
+        # Dynamically create causal mask
         seq_len = bottleneck.shape[1]
         bottleneck = self.pos_encoding(bottleneck, seq_len=seq_len)
         causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=bottleneck.device), diagonal=1).bool()
         
-        # 应用因果Transformer
+        # Apply causal Transformer
         bottleneck = self.transformer(bottleneck, mask=causal_mask)  # [B, seq_len, d_model]
         bottleneck = self.proj_from_transformer(bottleneck)  # [B, seq_len, d_model] -> [B, seq_len, channels]
         bottleneck = bottleneck.transpose(1, 2)  # [B, seq_len, channels] -> [B, channels, seq_len]
 
-        # 3. 解码器路径 - 正确的skip connection对应关系
+        # 3. Decoder path — correct skip connection correspondence
         current = bottleneck
         
-        # 从后往前使用skip connections (但保持正确的对应关系)
-        # dec0使用enc4_out, dec1使用enc3_out, dec2使用enc2_out, dec3使用enc1_out, dec4使用原始输入x
+        # Use skip connections in reverse order (dec0 uses enc4_out, dec1 uses enc3_out, etc.)
         for i, decoder in enumerate(self.decoders):
-            # 获取对应的skip connection (从后往前数)
             skip_idx = -(i + 2)  # -2, -3, -4, -5
             skip_conn = skip_connections[skip_idx]
             current = decoder(current, skip_conn)
 
-        # 4. 最终输出
+        # 4. Final output
         output = self.output_conv(current)
         
-        # 确保输出长度严格等于输入长度
+        # Ensure output length strictly equals input length
         if output.shape[2] > input_length:
             output = output[:, :, :input_length]
         elif output.shape[2] < input_length:
@@ -595,41 +593,41 @@ class HybridWaveNetUNet(nn.Module):
     def __init__(self, d_model=128, nhead=4, num_layers=4, dim_feedforward=512,
                  encoder_channels=[1, 32, 64, 128], 
                  decoder_channels=[128, 64, 32, 16],
-                 encoder_strides=[4, 4, 4],
-                 decoder_strides=[4, 4, 4],
-                 # WaveNet 后处理参数
+                 encoder_strides=[2, 4, 4],
+                 decoder_strides=[4, 4, 2],
+                 # WaveNet post-processing parameters
                  wavenet_channels=16,
                  wavenet_dilation_depth=4,
                  wavenet_num_repeat=1,
-                 # IR 分支
+                 # IR branch
                  use_ir=False,
                  ir_length=32768,
                  ir_wet=0.25):
         super().__init__()
         
-        self.input_length = 44100
+        self.input_length = 88200
         self.use_ir = use_ir
         
-        # 原有的 U-Net + Transformer 模型
+        # Original U-Net + Transformer model
         self.main_model = ReverbLongModel(
             d_model, nhead, num_layers, dim_feedforward,
             encoder_channels, decoder_channels,
             encoder_strides, decoder_strides
         )
         
-        # 后处理 WaveNet - 使用你之前定义的 WaveNet 类
+        # Post-processing WaveNet — using previously defined WaveNet class
         self.post_wavenet = WaveNet(
             num_channels=wavenet_channels,
             dilation_depth=wavenet_dilation_depth,
             num_repeat=wavenet_num_repeat,
             kernel_size=2,
-            output_channels=1  # 输出单通道音频
+            output_channels=1  
         )
         
-        # 残差门控参数（初始化为 0，经 sigmoid 后约等于 0.5）
+        # Residual gating parameter (initialized to 0, sigmoid yields ~0.5)
         self.gate_param = nn.Parameter(torch.tensor(0.0))
 
-                # --- 核心修改：替换卷积模块 ---
+        # IR module
         if self.use_ir:
             self.ir_branch = TrainableFastConvolver(
                 ir_length=ir_length, 
@@ -639,7 +637,7 @@ class HybridWaveNetUNet(nn.Module):
 
     @property
     def ir(self):
-        """暴露可学习的脉冲响应，便于调试、可视化、导出"""
+        """Expose trainable impulse response for debugging, visualization, or export"""
         if hasattr(self, 'ir_branch') and self.ir_branch is not None:
             return self.ir_branch.ir
         return None
@@ -647,30 +645,30 @@ class HybridWaveNetUNet(nn.Module):
     def forward(self, x):
         input_length = x.shape[2]
         
-        # 主模型处理
+        # Main model processing
         main_output = self.main_model(x)
         
-        # 确保主模型输出长度正确
+        # Ensure main model output length is correct
         if main_output.shape[2] > input_length:
             main_output = main_output[:, :, :input_length]
         elif main_output.shape[2] < input_length:
             pad_len = input_length - main_output.shape[2]
             main_output = F.pad(main_output, (0, pad_len))
         
-        # WaveNet 后处理
+        # WaveNet post-processing
         refined_output = self.post_wavenet(main_output)
 
-        # 可选 IR 卷积分支（针对长尾）
+        # Optional IR convolution branch
         if self.use_ir:
             ir_out = self.ir_branch(main_output)
             refined_output = 0.5 * refined_output + 0.5 * ir_out
         
         k = torch.sigmoid(self.gate_param)
 
-        # 融合方式：凸组合 (convex combination)
+        # Fusion method: convex combination
         final_output = (1 - k) * main_output + k * refined_output
         
-        # 确保最终输出长度正确
+        # Ensure final output length is correct
         if final_output.shape[2] > input_length:
             final_output = final_output[:, :, :input_length]
         elif final_output.shape[2] < input_length:

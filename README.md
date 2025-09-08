@@ -13,9 +13,9 @@ This repository focuses on training and evaluating effect models such as Overdri
 
 After training the `hybrid_wavenet_unet` model, you can visualize its performance:
 
-![Signal Comparison of Delay Model](models\Delay\detail_signal_comparison_e2s_0.0127.png)
+![Signal Comparison of Delay Model](models/Delay.detail_signal_comparison_e2s_0.0127.png)
 
-![Signal Comparison of Overdrive + Reverb Model](models\Overdrive+Delay\detail_signal_comparison_e2s_0.005.png)
+![Signal Comparison of Overdrive + Reverb Model](models/Overdrive+Delay/detail_signal_comparison_e2s_0.005.png)
 
 ### Repository Structure
 - `prepare.py`: Create training datasets from paired dry/wet `.wav` files (44.1 kHz mono recommended)

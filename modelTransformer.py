@@ -322,7 +322,7 @@ class CausalTransformer(nn.Module):
         self.output_proj = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
-            nn.Linear(d_model, 1)  # 输出每个时间点的1维预测
+            nn.Linear(d_model, 1)  # Output 1-D prediction per timestep
         )
         
         # Create causal mask (max_seq_len, max_seq_len)
@@ -534,7 +534,7 @@ class ReverbLongModel(nn.Module):
             kernel_size = 7 if i >= len(decoder_channels) - 3 else 5
             self.decoders.append(DecoderBlock(in_ch, out_ch, kernel_size=kernel_size, stride=stride))
 
-        # 最终输出层
+        # Final output layer
         self.output_conv = CausalConv1d(decoder_channels[-1], 1, kernel_size=1)
 
     def forward(self, x):
@@ -631,7 +631,7 @@ class HybridWaveNetUNet(nn.Module):
         if self.use_ir:
             self.ir_branch = TrainableFastConvolver(
                 ir_length=ir_length, 
-                train_seq_len=self.input_length, # 传入关键参数
+                train_seq_len=self.input_length, # Pass critical parameter
                 wet=ir_wet
             )
 

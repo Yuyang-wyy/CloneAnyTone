@@ -1,3 +1,7 @@
+"""
+Plot.py is adapted from the open-source repository: GuitarML/PedalNetRT, available at: https://github.com/GuitarML/PedalNetRT.
+"""
+
 import matplotlib.pyplot as plt
 import numpy as np
 

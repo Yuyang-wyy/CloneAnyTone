@@ -1,11 +1,10 @@
-### StealAnyTone
+### CloneAnyTone
 
 Neural audio modeling for guitar effects with hybrid architectures:
-- Hybrid WaveNet U-Net backbone with optional learnable IR branch (frequency-domain fast convolution)
-- Causal Transformer variants for short segments
+- Hybrid WaveNet U-Net Transformer backbone with optional learnable IR branch (frequency-domain fast convolution)
 - Robust, overlap-add (OLA) reconstruction for seamless long-form audio
 
-Purpose-built to extend time-invariant or short-term temporal guitar effects (e.g., overdrive, distortion, EQ) to model long-term temporal dependencies (e.g., reverb, delay, echo). 
+Able to clone any guitar tone (including tones produced with multiple pedals) using a few minutes of original and transformed recordings. Purpose-built to extend time-invariant or short-term temporal guitar effects (e.g., overdrive, distortion, EQ) to model long-term temporal dependencies (e.g., reverb, delay, echo). 
 
 This repository focuses on training and evaluating effect models such as Overdrive, Reverb, and Delay from paired dry/wet audio.
 
@@ -111,6 +110,3 @@ Optional interactive window:
 
 ### Acknowledgements
 This project reuses and adapts ideas and portions of code inspired by GuitarML's PedalNetRT. See the original repository for context and references: [GuitarML/PedalNetRT](https://github.com/GuitarML/PedalNetRT).
-
-
-
